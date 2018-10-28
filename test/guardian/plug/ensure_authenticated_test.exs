@@ -1,115 +1,81 @@
 defmodule Guardian.Plug.EnsureAuthenticatedTest do
-  use ExUnit.Case, async: true
-  use Plug.Test
+  @moduledoc false
 
+  use Plug.Test
+  use ExUnit.Case
+
+  alias Guardian.Plug, as: GPlug
   alias Guardian.Plug.EnsureAuthenticated
 
-  defmodule TestHandler do
-    def unauthenticated(conn, _) do
-      conn
-      |> Plug.Conn.assign(:guardian_spec, :unauthenticated)
-      |> Plug.Conn.send_resp(401, "Unauthenticated")
+  defmodule Handler do
+    @moduledoc false
+
+    import Plug.Conn
+
+    def auth_error(conn, {type, reason}, _opts) do
+      body = inspect({type, reason})
+      send_resp(conn, 401, body)
     end
   end
 
-  test "init/1 sets the handler option to the module that's passed in" do
-    %{handler: handler_opts} = EnsureAuthenticated.init(handler: TestHandler)
+  defmodule Impl do
+    @moduledoc false
 
-    assert handler_opts == {TestHandler, :unauthenticated}
+    use Guardian,
+      otp_app: :guardian,
+      token_module: Guardian.Support.TokenModule
+
+    def subject_for_token(%{id: id}, _claims), do: {:ok, id}
+    def subject_for_token(%{"id" => id}, _claims), do: {:ok, id}
+
+    def resource_from_claims(%{"sub" => id}), do: {:ok, %{id: id}}
   end
 
-  test "init/1 sets the handler option to the value of on_failure" do
-    %{handler: handler_opts} = EnsureAuthenticated.init(
-      on_failure: {TestHandler, :custom_failure_method}
-    )
+  @resource %{id: "bobby"}
 
-    assert handler_opts == {TestHandler, :custom_failure_method}
+  setup do
+    impl = Impl
+    handler = Handler
+    {:ok, token, claims} = Impl.encode_and_sign(@resource)
+    {:ok, %{claims: claims, conn: conn(:get, "/"), token: token, impl: impl, handler: handler}}
   end
 
-  test "init/1 defaults the handler option to Guardian.Plug.ErrorHandler" do
-    %{handler: handler_opts} = EnsureAuthenticated.init %{}
-
-    assert handler_opts == {Guardian.Plug.ErrorHandler, :unauthenticated}
+  describe "with no authenticated token" do
+    test "returns an error", ctx do
+      conn = EnsureAuthenticated.call(ctx.conn, module: ctx.impl, error_handler: ctx.handler)
+      assert {401, _, "{:unauthenticated, :unauthenticated}"} = sent_resp(conn)
+      assert conn.halted
+    end
   end
 
-  test "init/1 with default options" do
-    options = EnsureAuthenticated.init %{}
+  describe "with an authenticated token" do
+    setup ctx do
+      conn =
+        ctx.conn
+        |> GPlug.put_current_token(ctx.token, [])
+        |> GPlug.put_current_claims(ctx.claims, [])
 
-    assert options == %{
-      claims: %{},
-      handler: {Guardian.Plug.ErrorHandler, :unauthenticated},
-      key: :default
-    }
-  end
+      {:ok, %{conn: conn}}
+    end
 
-  test "init/1 uses all opts as claims except :on_failure, :key and :handler" do
-    %{claims: claims} = EnsureAuthenticated.init(
-      on_failure: {TestHandler, :some_method},
-      key: :super_secret,
-      handler: TestHandler,
-      foo: "bar",
-      another: "option"
-    )
+    test "allows the plug to continue", ctx do
+      conn = EnsureAuthenticated.call(ctx.conn, module: ctx.impl, error_handler: ctx.handler)
+      refute conn.halted
+      refute conn.status == 401
+    end
 
-    assert claims == %{"foo" => "bar", "another" => "option"}
-  end
+    test "rejects when claims to not match", ctx do
+      conn =
+        EnsureAuthenticated.call(
+          ctx.conn,
+          module: ctx.impl,
+          error_handler: ctx.handler,
+          claims: %{no: "access"}
+        )
 
-  test "it validates claims and calls through if the claims are ok" do
-    claims = %{ "aud" => "token", "sub" => "user1" }
-    conn = :get |> conn("/foo") |> Guardian.Plug.set_claims({ :ok, claims })
-    opts = EnsureAuthenticated.init(handler: TestHandler, aud: "token")
-    ensured_conn = EnsureAuthenticated.call(conn, opts)
-    refute must_authenticate?(ensured_conn)
-  end
-
-  test "it validates claims and fails if the claims do not match" do
-    claims = %{ "aud" => "oauth", "sub" => "user1" }
-    conn = :get |> conn("/foo") |> Guardian.Plug.set_claims({:ok, claims})
-    opts = EnsureAuthenticated.init(handler: TestHandler, aud: "token")
-    ensured_conn = EnsureAuthenticated.call(conn, opts)
-    assert must_authenticate?(ensured_conn)
-  end
-
-  test "doesn't call unauthenticated when there's a session with default key" do
-    claims = %{ "aud" => "token", "sub" => "user1" }
-    conn = :get |> conn("/foo") |> Guardian.Plug.set_claims({ :ok, claims })
-    opts = EnsureAuthenticated.init(handler: TestHandler)
-    ensured_conn = EnsureAuthenticated.call(conn, opts)
-    refute must_authenticate?(ensured_conn)
-  end
-
-  test "doesn't call unauthenticated when theres a session with specific key" do
-    claims = %{ "aud" => "token", "sub" => "user1" }
-    conn = :get
-            |> conn("/foo")
-            |> Guardian.Plug.set_claims({:ok, claims}, :secret)
-    opts = EnsureAuthenticated.init(handler: TestHandler, key: :secret)
-    ensured_conn = EnsureAuthenticated.call(conn, opts)
-    refute must_authenticate?(ensured_conn)
-  end
-
-  test "calls handler's unauthenticated/2 with no session for default key" do
-    conn = conn(:get, "/foo")
-    opts = EnsureAuthenticated.init(handler: TestHandler)
-    ensured_conn = EnsureAuthenticated.call(conn, opts)
-    assert must_authenticate?(ensured_conn)
-  end
-
-  test "calls handler's unauthenticated/2 with no session for specific key" do
-    conn = conn(:get, "/foo")
-    opts = EnsureAuthenticated.init(handler: TestHandler, key: :secret)
-    ensured_conn = EnsureAuthenticated.call(conn, opts)
-    assert must_authenticate?(ensured_conn)
-  end
-
-  test "it halts the connection" do
-    conn = conn(:get, "/foo")
-    opts = EnsureAuthenticated.init(handler: TestHandler, key: :secret)
-    ensured_conn = EnsureAuthenticated.call(conn, opts)
-    assert ensured_conn.halted
-  end
-
-  defp must_authenticate?(conn) do
-    conn.assigns[:guardian_spec] == :unauthenticated
+      assert conn.halted
+      assert conn.status == 401
+      assert {401, _, "{:unauthenticated, :no}"} = sent_resp(conn)
+    end
   end
 end

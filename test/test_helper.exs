@@ -1,27 +1,12 @@
-defmodule Guardian.TestGuardianSerializer do
-  @behaviour Guardian.Serializer
-  def for_token(%{error: :unknown}), do: { :error, "Unknown resource type" }
-
-  def for_token(aud), do: { :ok, aud }
-  def from_token(aud), do: { :ok, aud }
-end
-
 defmodule Guardian.TestHelper do
-  @default_opts [
-    store: :cookie,
-    key: "foobar",
-    encryption_salt: "encrypted cookie salt",
-    signing_salt: "signing salt"
-  ]
+  @moduledoc false
+  defmacro __using__(_ \\ []) do
+    quote do
+      def subject_for_token(%{id: id}, _claims), do: {:ok, id}
+      def subject_for_token(%{"id" => id}, _claims), do: {:ok, id}
 
-  @secret String.duplicate("abcdef0123456789", 8)
-  @signing_opts Plug.Session.init(Keyword.put(@default_opts, :encrypt, false))
-
-  def conn_with_fetched_session(the_conn) do
-    the_conn.secret_key_base
-    |> put_in(@secret)
-    |> Plug.Session.call(@signing_opts)
-    |> Plug.Conn.fetch_session
+      def resource_from_claims(%{"sub" => id}), do: {:ok, %{id: id}}
+    end
   end
 end
 

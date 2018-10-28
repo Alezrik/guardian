@@ -1,6 +1,88 @@
-# Master (Unreleased)
+# v 1.1.0
+
+* JWT secret fetcher behaviour added
+* Let Guardian plug call :revoke on sign_out [#458](https://github.com/ueberauth/guardian/pull/458)
+* Fix an issue where Guardian.Plug tries to clear the wrong keys from the conn [#476](https://github.com/ueberauth/guardian/pull/476)
+
+# v 1.0.0
+
+* Allow for multiple Guardian setups in a single applications
+* Adds pipelines
+* Significantly updates Guardian api to be more consistent
+* Make Phoenix an optional dependency
+* Make Plug an optional dependency
+* Permissions as an optional add-in
+* Deprecates Hooks in favour of callbacks on particular implementations
+* Removes Phoenix macros in favour of plain functions
+
+See the [0.14 to 1.0 Upgrade Guide](upgrade_guides/0.14.to.1.0.md) for detailed updating instructions
+
+# v 0.14.5
+
+Update the poison and phoenix deps to allow a broader version setting
+
+# v 0.14.4
+
+* Fix a param issue in sockets
+
+# v 0.14.3
+
+* Fix function specs
+* Renew session on `sign_in`
+* Add a custom claim key from load resource
+
+# v 0.14.2
+
+* __Really_ fix pattern matching error with GuardianDB
+
+# v 0.14.1
+
+* Fixed pattern matching error with GuardianDB
+
+# v 0.14.0
+
+* Update to Elixir 1.3
+* Added test coverage: https://github.com/ueberauth/guardian/pull/234
+* Token exchange: https://github.com/ueberauth/guardian/pull/150
+* Adds ensure resource plug https://github.com/ueberauth/guardian/pull/238
+* Name collision fix: https://github.com/ueberauth/guardian/pull/215
+* Support for `{:system, var}` configuration options
+* Adds an `allowed_drift` option to allow for clock skew
+
+### Bugs
+
+* Replaced taking a function for configuring secret_key with accepting a tuple {mod, func, args}
+
+# v 0.13.0
+
+* Change default token type from "token" to "access"
+* Fix Dialyzer errors
+* Target Elixir 1.3+
+* Update Jose and Phoenix dependencies
+* Fixes for ttl and exp
+* Added integration tests
+
+# v 0.12.0
+* Add `one_of` to permissions Plug to allow for OR'd sets of permissions as well as AND'd ones
+* Fix infinite recursion bug when joining channels
+
+# v 0.11.1
+
+* Support for secret keys other than "oct" which provides support for signature
+  algorithms other than HSxxx. See #122
+* Fix incorrect param name in channel
+* Tighten up log calls
+* Fix moar typos
+* General code cleanup
+* Losen poison requirement to >= 1.3.0
+* Use existing resource on conn if already present
+* Fix refresh to correctly use revoke
+
+# v 0.10.1
 
 * Fix error in Guardian.Plug.ErrorHandler when Accept header is unset.
+* Adding Guardian.Plug.EnsureNotAuthenticated to validates that user isn't logged
+* Fix bug where TTL was not able to be set when generating tokens
 
 # v 0.10.0
 

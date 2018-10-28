@@ -1,124 +1,160 @@
 defmodule Guardian.Plug.VerifyHeaderTest do
-  use ExUnit.Case, async: true
+  @moduledoc false
+
   use Plug.Test
 
-  alias Guardian.Claims
-  alias Guardian.Plug.VerifyHeader
+  alias Guardian.Plug, as: GPlug
+  alias GPlug.{VerifyHeader, Pipeline}
+
+  use ExUnit.Case, async: true
+
+  defmodule Handler do
+    @moduledoc false
+
+    import Plug.Conn
+
+    def auth_error(conn, {type, reason}, _opts) do
+      body = inspect({type, reason})
+      send_resp(conn, 401, body)
+    end
+  end
+
+  defmodule Impl do
+    @moduledoc false
+
+    use Guardian,
+      otp_app: :guardian,
+      token_module: Guardian.Support.TokenModule
+
+    def subject_for_token(%{id: id}, _claims), do: {:ok, id}
+    def subject_for_token(%{"id" => id}, _claims), do: {:ok, id}
+
+    def resource_from_claims(%{"sub" => id}), do: {:ok, %{id: id}}
+  end
+
+  @resource %{id: "bobby"}
 
   setup do
-    config = Application.get_env(:guardian, Guardian)
-    algo = hd(Keyword.get(config, :allowed_algos))
-    secret = Keyword.get(config, :secret_key)
-
-    jose_jws = %{"alg" => algo}
-    jose_jwk = %{"kty" => "oct", "k" => :base64url.encode(secret)}
-    claims = Claims.app_claims(%{ "sub" => "user", "aud" => "aud" })
-    { _, jwt } = jose_jwk
-                 |> JOSE.JWT.sign(jose_jws, claims)
-                 |> JOSE.JWS.compact
-
-    {
-      :ok,
-      conn: conn(:get, "/"),
-      jwt: jwt,
-      claims: claims,
-      jose_jws: jose_jws,
-      jose_jwk: jose_jwk,
-      secret: secret
-    }
+    impl = __MODULE__.Impl
+    handler = __MODULE__.Handler
+    {:ok, token, claims} = __MODULE__.Impl.encode_and_sign(@resource)
+    {:ok, %{claims: claims, conn: conn(:get, "/"), token: token, impl: impl, handler: handler}}
   end
 
-  test "with no JWT in the session at a default location", context do
-    conn = VerifyHeader.call(context.conn, %{})
-    assert Guardian.Plug.claims(conn) == {:error, :no_session}
-    assert Guardian.Plug.current_token(conn) == nil
+  test "with no token" do
+    conn = :get |> conn("/") |> VerifyHeader.call([])
+
+    refute conn.status == 401
+    assert GPlug.current_token(conn, []) == nil
+    assert GPlug.current_claims(conn, []) == nil
   end
 
-  test "with no JWT in the session at a specified location", context do
-    conn = VerifyHeader.call(context.conn, %{key: :secret})
-    assert Guardian.Plug.claims(conn, :secret) == {:error,  :no_session}
-    assert Guardian.Plug.current_token(conn, :secret) == nil
+  test "it uses the module from options", ctx do
+    conn =
+      :get
+      |> conn("/")
+      |> put_req_header("authorization", ctx.token)
+      |> VerifyHeader.call(module: ctx.impl)
+
+    refute conn.status == 401
+    assert GPlug.current_token(conn, []) == ctx.token
+    assert GPlug.current_claims(conn, []) == ctx.claims
   end
 
-  test "with a valid JWT in the session at the default location", context do
-    the_conn = context.conn |> put_req_header("authorization", context.jwt)
-    conn = VerifyHeader.call(the_conn, %{})
-    assert Guardian.Plug.claims(conn) == { :ok, context.claims }
-    assert Guardian.Plug.current_token(conn) == context.jwt
+  test "it finds the module from the pipeline", ctx do
+    conn =
+      :get
+      |> conn("/")
+      |> put_req_header("authorization", ctx.token)
+      |> Pipeline.put_module(ctx.impl)
+      |> VerifyHeader.call([])
+
+    refute conn.status == 401
+    assert GPlug.current_token(conn, []) == ctx.token
+    assert GPlug.current_claims(conn, []) == ctx.claims
   end
 
-  test "with a valid JWT in the session at a specified location", context do
-    the_conn = context.conn |> put_req_header("authorization", context.jwt)
-    conn = VerifyHeader.call(the_conn, %{key: :secret})
-    assert Guardian.Plug.claims(conn, :secret) == { :ok, context.claims }
-    assert Guardian.Plug.current_token(conn, :secret) == context.jwt
+  test "with an existing token on the connection it leaves it intact", ctx do
+    {:ok, token, claims} = apply(ctx.impl, :encode_and_sign, [%{id: "jane"}])
+
+    conn =
+      :get
+      |> conn("/")
+      |> put_req_header("authorization", ctx.token)
+      |> GPlug.put_current_token(token)
+      |> GPlug.put_current_claims(claims)
+      |> VerifyHeader.call([])
+
+    refute conn.status == 401
+    assert GPlug.current_token(conn) == token
+    assert GPlug.current_claims(conn) == claims
   end
 
-  test "with an existing session in another location", context do
-    the_conn = context.conn
-               |> put_req_header("authorization", context.jwt)
-               |> Guardian.Plug.set_claims(context.claims)
-               |> Guardian.Plug.set_current_token(context.jwt)
-
-    conn = VerifyHeader.call(the_conn, %{key: :secret})
-    assert Guardian.Plug.claims(conn, :secret) == { :ok, context.claims }
-    assert Guardian.Plug.current_token(conn, :secret) == context.jwt
+  test "with no module", ctx do
+    assert_raise RuntimeError, "`module` not set in Guardian pipeline", fn ->
+      :get
+      |> conn("/")
+      |> put_req_header("authorization", ctx.token)
+      |> VerifyHeader.call([])
+    end
   end
 
-  test "with a realm specified", context do
-    the_conn = put_req_header(
-      context.conn,
-      "authorization",
-      "Bearer #{context.jwt}"
-    )
+  test "with a key specified", ctx do
+    conn =
+      :get
+      |> conn("/")
+      |> put_req_header("authorization", ctx.token)
+      |> VerifyHeader.call(module: ctx.impl, key: :secret)
 
-    opts = VerifyHeader.init(realm: "Bearer")
+    refute GPlug.current_token(conn)
+    refute GPlug.current_claims(conn)
 
-    conn = VerifyHeader.call(the_conn, opts)
-    assert Guardian.Plug.claims(conn) == { :ok, context.claims }
-    assert Guardian.Plug.current_token(conn) == context.jwt
+    assert GPlug.current_token(conn, key: :secret) == ctx.token
+    assert GPlug.current_claims(conn, key: :secret) == ctx.claims
   end
 
-  test "with a realm specified and multiple auth headers", context do
-    claims2 = Claims.app_claims(%{ "sub" => "user2", "aud" => "aud2" })
-    { _, jwt2 } = context.jose_jwk
-                  |> JOSE.JWT.sign(context.jose_jws, claims2)
-                  |> JOSE.JWS.compact
+  test "with a token and mismatching claims", ctx do
+    conn =
+      :get
+      |> conn("/")
+      |> put_req_header("authorization", ctx.token)
+      |> VerifyHeader.call(module: ctx.impl, error_handler: ctx.handler, claims: %{no: "way"})
 
-    the_conn = context.conn
-               |> put_req_header("authorization", "Bearer #{context.jwt}")
-               |> put_req_header("authorization", "Client #{jwt2}")
-
-    opts = VerifyHeader.init(realm: "Client")
-
-    conn = VerifyHeader.call(the_conn, opts)
-    assert Guardian.Plug.claims(conn) == { :ok, claims2 }
-    assert Guardian.Plug.current_token(conn) == jwt2
+    assert conn.status == 401
+    assert conn.resp_body == inspect({:invalid_token, "no"})
   end
 
-  test "pulls different tokens into different locations", context do
-    claims2 = Claims.app_claims(%{ "sub" => "user2", "aud" => "aud2" })
-    { _, jwt2 } =context.jose_jwk
-                  |> JOSE.JWT.sign(context.jose_jws, claims2)
-                  |> JOSE.JWS.compact
+  test "with a token and matching claims", ctx do
+    conn =
+      :get
+      |> conn("/")
+      |> put_req_header("authorization", ctx.token)
+      |> VerifyHeader.call(module: ctx.impl, error_handler: ctx.handler, claims: ctx.claims)
 
-    # Can't use the put_req_header here since it overrides previous values
-    the_conn = %{context.conn | req_headers: [
-        {"authorization", "Bearer #{context.jwt}"},
-        {"authorization", "Client #{jwt2}"}
-      ]
-    }
+    refute conn.status == 401
+    assert GPlug.current_token(conn) == ctx.token
+    assert GPlug.current_claims(conn) == ctx.claims
+  end
 
-    default_opts = VerifyHeader.init(realm: "Bearer")
-    client_opts = VerifyHeader.init(realm: "Client", key: :client)
+  test "with a token and no specified claims", ctx do
+    conn =
+      :get
+      |> conn("/")
+      |> put_req_header("authorization", ctx.token)
+      |> VerifyHeader.call(module: ctx.impl, error_handler: ctx.handler)
 
-    conn = the_conn
-           |> VerifyHeader.call(default_opts)
-           |> VerifyHeader.call(client_opts)
+    refute conn.status == 401
+    assert GPlug.current_token(conn) == ctx.token
+    assert GPlug.current_claims(conn) == ctx.claims
+  end
 
-    assert Guardian.Plug.claims(conn, :client) == { :ok, claims2 }
-    assert Guardian.Plug.current_token(conn, :client) == jwt2
-    assert Guardian.Plug.claims(conn) == { :ok, context.claims }
-    assert Guardian.Plug.current_token(conn) == context.jwt
+  test "with an invalid token", ctx do
+    conn =
+      :get
+      |> conn("/")
+      |> put_req_header("authorization", "not a good one")
+      |> VerifyHeader.call(module: ctx.impl, error_handler: ctx.handler)
+
+    assert conn.status == 401
   end
 end
